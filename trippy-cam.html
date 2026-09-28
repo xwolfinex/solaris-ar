@@ -32,14 +32,18 @@
 
   .btn { appearance: none; border: 1px solid var(--line); background: rgba(255,255,255,0.08); color: var(--text);
     border-radius: 999px; padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
-  .btn.primary { border: 0; padding: 14px 28px; font-size: 16px;
-    background: linear-gradient(90deg, #7c3aed, #a855f7); }
+  .btn.primary { border: 0; padding: 14px 28px; font-size: 16px; background: linear-gradient(90deg, #7c3aed, #a855f7); }
   .btn.on { background: var(--accent); border-color: var(--accent); }
   .btn.rec { background: var(--rec); border-color: var(--rec); }
 
   #ui { position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; padding: 10px 0 calc(12px + env(safe-area-inset-bottom));
-    background: linear-gradient(to top, rgba(7,4,15,0.85), rgba(7,4,15,0)); transition: opacity .25s; }
+    background: linear-gradient(to top, rgba(7,4,15,0.88), rgba(7,4,15,0)); transition: opacity .25s; }
   #ui.hidden { opacity: 0; pointer-events: none; }
+  #groups { display: flex; gap: 6px; padding: 0 16px 6px; overflow-x: auto; scrollbar-width: none; }
+  #groups::-webkit-scrollbar { display: none; }
+  .grp { flex: 0 0 auto; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px;
+    padding: 4px 8px; border-radius: 8px; cursor: pointer; }
+  .grp.active { color: var(--text); background: rgba(255,255,255,0.1); }
   #chips { display: flex; gap: 8px; overflow-x: auto; padding: 4px 16px 10px; scrollbar-width: none; }
   #chips::-webkit-scrollbar { display: none; }
   .chip { flex: 0 0 auto; border: 1px solid var(--line); background: var(--panel); color: var(--text);
@@ -49,14 +53,17 @@
   .sliders label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .row { display: flex; gap: 8px; padding: 0 16px; justify-content: space-between; }
-  .row .btn { flex: 1; padding: 10px 6px; }
+  .row .btn { flex: 1; padding: 10px 4px; font-size: 13px; }
   #hint { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
     z-index: 3; background: var(--panel); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px;
-    font-size: 12px; color: var(--muted); transition: opacity .4s; pointer-events: none; }
+    font-size: 12px; color: var(--muted); transition: opacity .4s; pointer-events: none; white-space: nowrap; }
   #toast { position: fixed; top: calc(50px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
     z-index: 4; background: var(--panel); border: 1px solid var(--line); padding: 8px 14px; border-radius: 12px;
     font-size: 13px; max-width: calc(100vw - 32px); opacity: 0; transition: opacity .3s; pointer-events: none; }
   #toast.show { opacity: 1; }
+  #trackstat { display: none; position: fixed; top: calc(92px + env(safe-area-inset-top)); left: 16px; right: 16px; z-index: 4;
+    background: var(--panel); border: 1px solid var(--line); padding: 8px 12px; border-radius: 12px; font-size: 12px;
+    color: var(--muted); word-break: break-word; max-height: 30vh; overflow: auto; }
 </style>
 </head>
 <body>
@@ -64,24 +71,27 @@
 
 <div id="start">
   <h1>Trippy Cam</h1>
-  <p>Live psychedelic effects on your camera. Pick an effect, tune intensity and trails, turn on Mic to make it react to music, and hit Rec to save a clip.</p>
+  <p>Live psychedelic effects on your camera, including effects that track your body, face and hands. Pick an effect, tune it, turn on Mic or Beat to make it react to music, and hit Rec to save a clip.</p>
   <button class="btn primary" id="go">Start camera</button>
   <div id="err"></div>
 </div>
 
 <div id="hint">Tap the screen to hide or show controls</div>
 <div id="toast"></div>
+<div id="trackstat"></div>
 
 <div id="ui" class="hidden">
+  <div id="groups"></div>
   <div id="chips"></div>
   <div class="sliders">
     <label>Intensity <input type="range" id="k" min="0" max="1" step="0.01" value="0.6"></label>
-    <label>Trails <input type="range" id="tr" min="0" max="0.97" step="0.01" value="0.35"></label>
+    <label>Trails <input type="range" id="tr" min="0" max="0.97" step="0.01" value="0.3"></label>
   </div>
   <div class="row">
     <button class="btn" id="flip">Flip</button>
     <button class="btn" id="reset">Reset cam</button>
     <button class="btn" id="mic">Mic react</button>
+    <button class="btn" id="beat">Beat: off</button>
   </div>
   <div class="row" style="margin-top:8px">
     <button class="btn" id="protect">Keep me clear</button>
@@ -92,17 +102,48 @@
 
 <script>
 (() => {
-  const EFFECTS = ["Ripples", "Aura", "Kaleido", "RGB Split", "Liquid", "Acid", "Vortex", "Mirror", "Thermal", "Neon Edges", "Glitch", "Tunnel"];
-  const PERSON_FX = [0, 1]; // effects that need person detection
+  // ---------------------------------------------------------------------------
+  // Effect list. "id" is the shader branch; "needs" lists the trackers it uses.
+  // ---------------------------------------------------------------------------
+  const EFFECTS = [
+    { name: "Ripples",      id: 0,  group: "Body",  needs: ["seg"] },
+    { name: "Aura",         id: 1,  group: "Body",  needs: ["seg"] },
+    { name: "Echo Clones",  id: 2,  group: "Body",  needs: ["seg", "hist"] },
+    { name: "Cosmic BG",    id: 3,  group: "Body",  needs: ["seg"] },
+    { name: "Spiral Eyes",  id: 4,  group: "Face",  needs: ["face"] },
+    { name: "Glow Eyes",    id: 5,  group: "Face",  needs: ["face"] },
+    { name: "Third Eye",    id: 6,  group: "Face",  needs: ["face"] },
+    { name: "Face Melt",    id: 7,  group: "Face",  needs: ["face"] },
+    { name: "Face Mirror",  id: 8,  group: "Face",  needs: ["face"] },
+    { name: "Mouth Portal", id: 9,  group: "Face",  needs: ["face"] },
+    { name: "Hand Sparks",  id: 10, group: "Hands", needs: ["hand"] },
+    { name: "Hand Smoke",   id: 11, group: "Hands", needs: ["hand"] },
+    { name: "Slit-Scan",    id: 12, group: "Time",  needs: ["hist"] },
+    { name: "Kaleido",      id: 13, group: "Trippy", needs: [] },
+    { name: "RGB Split",    id: 14, group: "Trippy", needs: [] },
+    { name: "Liquid",       id: 15, group: "Trippy", needs: [] },
+    { name: "Acid",         id: 16, group: "Trippy", needs: [] },
+    { name: "Vortex",       id: 17, group: "Trippy", needs: [] },
+    { name: "Mirror",       id: 18, group: "Trippy", needs: [] },
+    { name: "Thermal",      id: 19, group: "Trippy", needs: [] },
+    { name: "Neon Edges",   id: 20, group: "Trippy", needs: [] },
+    { name: "Glitch",       id: 21, group: "Trippy", needs: [] },
+    { name: "Tunnel",       id: 22, group: "Trippy", needs: [] },
+  ];
+  const GROUPS = ["All", "Body", "Face", "Hands", "Time", "Trippy"];
+
   const $ = id => document.getElementById(id);
+  const Q = new URLSearchParams(location.search);
   const canvas = $("c");
   const video = document.createElement("video");
   video.playsInline = true; video.muted = true; video.setAttribute("playsinline", "");
 
-  let gl, fxProg, blitProg, camTex, fbos = [], fboTex = [], cur = 0;
-  let stream = null, facing = "user", mode = 0, auto = false, lastAuto = 0;
-  let analyser = null, freq = null, audioLevel = 0, micStream = null, audioCtx = null;
+  let gl, fxProg, blitProg, storeProg, partProg, quadBuf, partBuf, camTex, segTex, fbos = [], fboTex = [], cur = 0;
+  let stream = null, facing = "user", mode = 0, auto = false, lastAuto = 0, protect = false;
+  let analyser = null, freq = null, audioLevel = 0, bassRaw = 0, bassAvg = 0, micStream = null, audioCtx = null;
+  let beatMode = 0, lastBeat = 0, flash = 0;
   let recorder = null, chunks = [], recStart = 0, recTimer = null;
+  let lastNow = performance.now();
   const t0 = performance.now();
 
   function toast(msg, ms = 2500) {
@@ -111,17 +152,32 @@
   }
 
   // ---------- UI ----------
-  EFFECTS.forEach((name, i) => {
-    const b = document.createElement("button");
-    b.className = "chip" + (i === 0 ? " active" : ""); b.textContent = name;
-    b.onclick = e => { e.stopPropagation(); setMode(i); if (auto) toggleAuto(); };
-    $("chips").appendChild(b);
-  });
+  let group = "All";
+  function renderGroups() {
+    $("groups").innerHTML = "";
+    GROUPS.forEach(g => {
+      const b = document.createElement("button"); b.className = "grp" + (g === group ? " active" : ""); b.textContent = g;
+      b.onclick = e => { e.stopPropagation(); group = g; renderGroups(); renderChips(); };
+      $("groups").appendChild(b);
+    });
+  }
+  function renderChips() {
+    $("chips").innerHTML = "";
+    EFFECTS.forEach((fx, i) => {
+      if (group !== "All" && fx.group !== group) return;
+      const b = document.createElement("button");
+      b.className = "chip" + (i === mode ? " active" : ""); b.textContent = fx.name; b.dataset.i = i;
+      b.onclick = e => { e.stopPropagation(); setMode(i); if (auto) toggleAuto(); };
+      $("chips").appendChild(b);
+    });
+  }
   function setMode(i) {
     mode = i;
-    if (PERSON_FX.includes(i)) loadSeg();
-    [...$("chips").children].forEach((c, j) => c.classList.toggle("active", j === i));
-    $("chips").children[i].scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+    EFFECTS[i].needs.forEach(n => { if (T[n]) loadTracker(T[n]); });
+    [...$("chips").children].forEach(c => c.classList.toggle("active", +c.dataset.i === i));
+    const el = [...$("chips").children].find(c => +c.dataset.i === i);
+    if (el) el.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+    updateStatus();
   }
   function toggleAuto() { auto = !auto; $("auto").classList.toggle("on", auto); lastAuto = performance.now(); }
   $("auto").onclick = e => { e.stopPropagation(); toggleAuto(); };
@@ -130,6 +186,11 @@
     if (!stream) return;
     $("ui").classList.toggle("hidden"); $("hint").style.opacity = 0;
   });
+  $("protect").onclick = e => {
+    e.stopPropagation(); protect = !protect; $("protect").classList.toggle("on", protect);
+    if (protect) loadTracker(T.seg);
+    updateStatus();
+  };
 
   // ---------- Camera ----------
   let camBusy = false, lastVT = -1, stallSince = 0;
@@ -146,7 +207,7 @@
           video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
       } catch (e) {
         if (e.name === "NotAllowedError") throw e;
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); // plain fallback
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       }
       stream.getVideoTracks().forEach(t => t.onended = () => resetCam("Camera stopped, restarting"));
       video.srcObject = stream; await video.play();
@@ -157,6 +218,7 @@
     if (!gl) return;
     fbos.forEach(f => { gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); });
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    hist.count = 0;
   }
   async function resetCam(msg) {
     if (camBusy) return;
@@ -165,8 +227,8 @@
     catch (e) { toast("Camera restart failed: " + (e.message || e.name)); }
   }
   $("reset").onclick = e => { e.stopPropagation(); resetCam("Restarting camera"); };
-  // Watchdog: restart if the feed stops advancing for 2s or the track ends
   setInterval(() => {
+    updateStatus();
     if (!stream || camBusy || document.hidden) return;
     const tr = stream.getVideoTracks()[0];
     if (!tr || tr.readyState === "ended") { resetCam("Camera stopped, restarting"); return; }
@@ -191,7 +253,7 @@
       $("start").style.display = "none"; $("ui").classList.remove("hidden");
       setTimeout(() => $("hint").style.opacity = 0, 4000);
       requestAnimationFrame(frame);
-      if (PERSON_FX.includes(mode)) loadSeg();
+      setMode(mode);
     } catch (e) {
       $("err").textContent = "Could not open the camera: " + (e.message || e.name) + ". Check that camera permission is allowed for this site.";
     }
@@ -202,124 +264,58 @@
     try { await startCam(); clearTrails(); } catch (err) { toast("Could not switch camera"); }
   };
 
-  // ---------- Person detection (MediaPipe Selfie Segmenter) ----------
-  // Produces a small texture: luminance = distance outside the person, alpha = person mask.
-  const MP_VER = "1.0.1";
-  const MP_BUNDLE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}/vision_bundle.mjs`;
-  const MP_WASM = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}/wasm`;
-  const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
-  const DMAX = 0.6; // max encoded distance, in fractions of frame height
-  let segmenter = null, segLoading = false, segReady = false, segTex = null, segBuf = null, segDist = null, lastSeg = 0;
-  const fakeSeg = new URLSearchParams(location.search).has("fakeseg");
-  let protect = false;
-
-  async function loadSeg() {
-    if (segReady || segLoading) return;
-    if (fakeSeg) { segReady = true; return; }
-    segLoading = true; toast("Loading person detection...", 4000);
-    try {
-      const { FilesetResolver, ImageSegmenter } = await import(MP_BUNDLE);
-      const fileset = await FilesetResolver.forVisionTasks(MP_WASM);
-      const opts = d => ({ baseOptions: { modelAssetPath: MP_MODEL, delegate: d },
-        runningMode: "VIDEO", outputConfidenceMasks: true, outputCategoryMask: false });
-      try { segmenter = await ImageSegmenter.createFromOptions(fileset, opts("GPU")); }
-      catch (e) { segmenter = await ImageSegmenter.createFromOptions(fileset, opts("CPU")); }
-      segReady = true; toast("Person detection ready");
-    } catch (e) {
-      toast("Person detection failed to load. Ripples will use the center of the frame.", 5000);
-      console.error(e);
-    } finally { segLoading = false; }
-  }
-  $("protect").onclick = e => {
-    e.stopPropagation(); protect = !protect; $("protect").classList.toggle("on", protect);
-    if (protect) loadSeg();
-  };
-
-  // Two-pass chamfer distance transform: distance from each pixel to the nearest person pixel
-  function buildSegTexture(conf, W, H) {
-    const n = W * H;
-    if (!segBuf || segBuf.length !== n * 2) { segBuf = new Uint8Array(n * 2); segDist = new Float32Array(n); }
-    // Some model builds report background instead of person; if the frame border is mostly "on", invert.
-    let border = 0, bc = 0;
-    for (let x = 0; x < W; x += 4) { border += conf[x] + conf[(H - 1) * W + x]; bc += 2; }
-    for (let y = 0; y < H; y += 4) { border += conf[y * W] + conf[y * W + W - 1]; bc += 2; }
-    const inv = border / bc > 0.6;
-    const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
-    const ax = (vw / vh) / W, ay = 1 / H, ad = Math.hypot(ax, ay), k21 = Math.hypot(2 * ax, ay), k12 = Math.hypot(ax, 2 * ay), BIG = 1e3;
-    const D = segDist;
-    for (let i = 0; i < n; i++) { const c = inv ? 1 - conf[i] : conf[i]; D[i] = c > 0.5 ? 0 : BIG; segBuf[i * 2 + 1] = Math.max(0, Math.min(255, c * 255)); }
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x; let d = D[i]; if (d === 0) continue;
-      if (x > 0) d = Math.min(d, D[i - 1] + ax);
-      if (y > 0) { d = Math.min(d, D[i - W] + ay); if (x > 0) d = Math.min(d, D[i - W - 1] + ad); if (x < W - 1) d = Math.min(d, D[i - W + 1] + ad);
-        if (x > 1) d = Math.min(d, D[i - W - 2] + k21); if (x < W - 2) d = Math.min(d, D[i - W + 2] + k21); }
-      if (y > 1) { if (x > 0) d = Math.min(d, D[i - 2 * W - 1] + k12); if (x < W - 1) d = Math.min(d, D[i - 2 * W + 1] + k12); }
-      D[i] = d;
-    }
-    for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
-      const i = y * W + x; let d = D[i]; if (d === 0) continue;
-      if (x < W - 1) d = Math.min(d, D[i + 1] + ax);
-      if (y < H - 1) { d = Math.min(d, D[i + W] + ay); if (x < W - 1) d = Math.min(d, D[i + W + 1] + ad); if (x > 0) d = Math.min(d, D[i + W - 1] + ad);
-        if (x < W - 2) d = Math.min(d, D[i + W + 2] + k21); if (x > 1) d = Math.min(d, D[i + W - 2] + k21); }
-      if (y < H - 2) { if (x < W - 1) d = Math.min(d, D[i + 2 * W + 1] + k12); if (x > 0) d = Math.min(d, D[i + 2 * W - 1] + k12); }
-      D[i] = d;
-    }
-    let any = false;
-    for (let i = 0; i < n; i++) { if (D[i] < BIG) any = true; segBuf[i * 2] = Math.min(255, D[i] / DMAX * 255); }
-    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, segTex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, W, H, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, segBuf);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    segHasPerson = any;
-  }
-  let segHasPerson = false;
-  function runSeg(now) {
-    if (!segReady || video.readyState < 2 || now - lastSeg < 33) return;
-    const needed = PERSON_FX.includes(mode) || protect;
-    if (!needed) return;
-    lastSeg = now;
-    if (fakeSeg) { // synthetic moving figure for testing without a real person
-      const W = 128, H = 128, c = new Float32Array(W * H), cx = 0.5 + 0.15 * Math.sin(now / 900);
-      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        const u = x / W - cx, v = y / H - 0.62, head = Math.hypot(u, (y / H - 0.3) * 1.2) < 0.09;
-        c[y * W + x] = (head || (Math.abs(u) < 0.16 && v > 0 && v < 0.45)) ? 1 : 0;
-      }
-      buildSegTexture(c, W, H); return;
-    }
-    if (!segmenter) return;
-    try {
-      segmenter.segmentForVideo(video, now, res => {
-        const masks = res.confidenceMasks; if (!masks || !masks.length) return;
-        const m = masks[masks.length - 1];
-        buildSegTexture(m.getAsFloat32Array(), m.width, m.height);
-      });
-    } catch (e) { console.error(e); }
-  }
-
-  // ---------- Mic (audio reactive) ----------
-  $("mic").onclick = async e => {
-    e.stopPropagation();
-    if (micStream) {
-      micStream.getTracks().forEach(t => t.stop()); micStream = null; analyser = null;
-      $("mic").classList.remove("on"); return;
-    }
+  // ---------- Mic + beat detection ----------
+  async function micOn() {
+    if (micStream) return true;
     try {
       micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
       await audioCtx.resume();
       const src = audioCtx.createMediaStreamSource(micStream);
-      analyser = audioCtx.createAnalyser(); analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.6;
+      analyser = audioCtx.createAnalyser(); analyser.fftSize = 512; analyser.smoothingTimeConstant = 0.35;
       src.connect(analyser); freq = new Uint8Array(analyser.frequencyBinCount);
-      $("mic").classList.add("on"); toast("Mic on: effects now pulse with the bass");
-    } catch (err) { toast("Mic permission was blocked"); }
+      $("mic").classList.add("on"); return true;
+    } catch (err) { toast("Mic permission was blocked"); return false; }
+  }
+  function micOff() {
+    if (micStream) micStream.getTracks().forEach(t => t.stop());
+    micStream = null; analyser = null; $("mic").classList.remove("on");
+    if (beatMode) { beatMode = 0; $("beat").textContent = "Beat: off"; $("beat").classList.remove("on"); }
+  }
+  $("mic").onclick = async e => {
+    e.stopPropagation();
+    if (micStream) micOff(); else if (await micOn()) toast("Mic on: effects pulse with the bass");
   };
-  function readAudio() {
+  const BEAT_LABELS = ["Beat: off", "Beat: flash", "Beat: switch"];
+  $("beat").onclick = async e => {
+    e.stopPropagation();
+    const next = (beatMode + 1) % 3;
+    if (next && !(await micOn())) return;
+    beatMode = next; $("beat").textContent = BEAT_LABELS[beatMode]; $("beat").classList.toggle("on", beatMode > 0);
+    if (beatMode === 1) toast("Flashes on each kick drum");
+    if (beatMode === 2) toast("Flashes and switches effect on each kick drum");
+  };
+  function readAudio(now, dt) {
+    flash *= Math.exp(-dt * 7);
     if (!analyser) { audioLevel *= 0.9; return; }
     analyser.getByteFrequencyData(freq);
-    let s = 0; for (let i = 1; i < 10; i++) s += freq[i];
-    const v = Math.min(1, Math.max(0, (s / 9 / 255 - 0.25) * 1.6));
+    // bins 1-6 cover roughly 45-280 Hz at 48 kHz with fftSize 512: the kick drum range
+    let s = 0; for (let i = 1; i <= 6; i++) s += freq[i];
+    bassRaw = s / 6 / 255;
+    bassAvg = bassAvg * 0.96 + bassRaw * 0.04;
+    const v = Math.min(1, Math.max(0, (bassRaw - 0.25) * 1.6));
     audioLevel = audioLevel * 0.7 + v * 0.3;
+    if (beatMode && bassRaw > 0.35 && bassRaw > bassAvg * 1.3 && now - lastBeat > 220) {
+      lastBeat = now; flash = 1;
+      if (beatMode === 2) switchRandom();
+      if (EFFECTS[mode].id === 10 || EFFECTS[mode].id === 11) burst();
+    }
+  }
+  function usable(i) { return EFFECTS[i].needs.every(n => !T[n] || T[n].state !== "failed"); }
+  function switchRandom() {
+    const pool = EFFECTS.map((_, i) => i).filter(i => i !== mode && usable(i) &&
+      EFFECTS[i].needs.every(n => !T[n] || T[n].state === "ready"));
+    if (pool.length) setMode(pool[Math.floor(Math.random() * pool.length)]);
   }
 
   // ---------- Recording ----------
@@ -343,7 +339,7 @@
       const blob = new Blob(chunks, { type });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = "trippy-" + EFFECTS[mode].toLowerCase().replace(/\s+/g, "-") + "-" + Date.now() + (type.includes("mp4") ? ".mp4" : ".webm");
+      a.download = "trippy-" + EFFECTS[mode].name.toLowerCase().replace(/\s+/g, "-") + "-" + Date.now() + (type.includes("mp4") ? ".mp4" : ".webm");
       document.body.appendChild(a); a.click(); a.remove();
       toast("Saved " + a.download);
     };
@@ -356,9 +352,416 @@
     $("rec").textContent = "Stop 0:00";
   };
 
-  // ---------- WebGL ----------
+  // ---------------------------------------------------------------------------
+  // Trackers: person segmentation, face landmarks, hand landmarks.
+  // Each tries the current MediaPipe Tasks library (GPU, then CPU), then falls back
+  // to the older MediaPipe "solutions" packages, which ship their models on jsdelivr.
+  // ---------------------------------------------------------------------------
+  const TASKS_VERSIONS = ["1.0.1", "0.10.21"];
+  const MODELS = {
+    seg: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+    face: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
+    hand: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+  };
+  const LEGACY = {
+    seg:  { pkg: "selfie_segmentation", ver: "0.1.1675465747", cls: "SelfieSegmentation", js: "selfie_segmentation.js",
+            opts: { modelSelection: 0, selfieMode: false } },
+    face: { pkg: "face_mesh", ver: "0.4.1633559619", cls: "FaceMesh", js: "face_mesh.js",
+            opts: { maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5, selfieMode: false } },
+    hand: { pkg: "hands", ver: "0.4.1675469240", cls: "Hands", js: "hands.js",
+            opts: { maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5, selfieMode: false } },
+  };
+  const LABELS = { seg: "Person detection", face: "Face tracking", hand: "Hand tracking" };
+  const FAKE = { seg: Q.has("fakeseg"), face: Q.has("fakeface"), hand: Q.has("fakehand") };
+  const mkT = key => ({ key, state: "idle", via: "", inst: null, delegate: "", busy: false, last: 0, errors: [], seen: 0 });
+  const T = { seg: mkT("seg"), face: mkT("face"), hand: mkT("hand") };
+  let tasks = null, tasksErr = null;
+  const errText = e => String((e && e.message) || e).split("\n")[0].slice(0, 160);
+
+  async function getTasks() {
+    if (tasks) return tasks;
+    if (tasksErr) throw tasksErr;
+    const errs = [];
+    for (const ver of TASKS_VERSIONS) {
+      try {
+        const lib = await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${ver}/vision_bundle.mjs`);
+        const fileset = await lib.FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${ver}/wasm`);
+        tasks = { lib, fileset, ver }; return tasks;
+      } catch (e) { errs.push(`library ${ver}: ${errText(e)}`); }
+    }
+    tasksErr = new Error(errs.join(" | ")); throw tasksErr;
+  }
+  function createTasks(tr, delegate) {
+    const { lib, fileset } = tasks;
+    const baseOptions = { modelAssetPath: MODELS[tr.key], delegate };
+    if (tr.key === "seg") return lib.ImageSegmenter.createFromOptions(fileset,
+      { baseOptions, runningMode: "VIDEO", outputConfidenceMasks: true, outputCategoryMask: false });
+    if (tr.key === "face") return lib.FaceLandmarker.createFromOptions(fileset,
+      { baseOptions, runningMode: "VIDEO", numFaces: 1, outputFaceBlendshapes: false });
+    return lib.HandLandmarker.createFromOptions(fileset, { baseOptions, runningMode: "VIDEO", numHands: 2 });
+  }
+  const scriptCache = {};
+  function loadScript(src) {
+    return scriptCache[src] || (scriptCache[src] = new Promise((res, rej) => {
+      const s = document.createElement("script"); s.src = src; s.crossOrigin = "anonymous";
+      s.onload = res; s.onerror = () => { delete scriptCache[src]; rej(new Error("could not load " + src)); };
+      document.head.appendChild(s);
+    }));
+  }
+  async function createLegacy(tr) {
+    const L = LEGACY[tr.key];
+    const base = `https://cdn.jsdelivr.net/npm/@mediapipe/${L.pkg}@${L.ver}/`;
+    await loadScript(base + L.js);
+    const inst = new window[L.cls]({ locateFile: f => base + f });
+    inst.setOptions(L.opts);
+    inst.onResults(r => onLegacyResult(tr, r));
+    await inst.initialize();
+    return inst;
+  }
+  async function loadTracker(tr) {
+    if (tr.state === "loading" || tr.state === "ready") return;
+    if (FAKE[tr.key]) { tr.state = "ready"; tr.via = "test"; return; }
+    tr.state = "loading"; tr.errors = []; updateStatus();
+    let inst = null;
+    if (!Q.has("legacy")) {
+      try {
+        await getTasks();
+        for (const d of ["GPU", "CPU"]) {
+          try { inst = await createTasks(tr, d); tr.via = "tasks " + tasks.ver; tr.delegate = d; break; }
+          catch (e) { tr.errors.push(`new ${d}: ${errText(e)}`); }
+        }
+      } catch (e) { tr.errors.push(errText(e)); }
+    }
+    if (!inst) {
+      try { inst = await createLegacy(tr); tr.via = "classic"; tr.delegate = ""; }
+      catch (e) { tr.errors.push(`classic: ${errText(e)}`); }
+    }
+    tr.inst = inst; tr.state = inst ? "ready" : "failed"; tr.seen = 0; tr.readyAt = performance.now();
+    if (!inst) console.error(LABELS[tr.key], tr.errors);
+    updateStatus();
+  }
+  async function runtimeFail(tr, e) {
+    console.error(LABELS[tr.key] + " runtime error", e);
+    tr.busy = true; tr.errors.push(`running (${tr.via} ${tr.delegate}): ${errText(e)}`);
+    try { tr.inst && tr.inst.close && tr.inst.close(); } catch (_) {}
+    tr.inst = null;
+    try {
+      if (tr.via.startsWith("tasks") && tr.delegate === "GPU") { tr.inst = await createTasks(tr, "CPU"); tr.delegate = "CPU"; }
+      else if (tr.via.startsWith("tasks")) { tr.inst = await createLegacy(tr); tr.via = "classic"; tr.delegate = ""; }
+    } catch (e2) { tr.errors.push(`fallback: ${errText(e2)}`); }
+    if (!tr.inst) tr.state = "failed";
+    tr.busy = false; updateStatus();
+  }
+  function neededTrackers() {
+    const s = new Set(EFFECTS[mode].needs);
+    if (protect) s.add("seg");
+    return s;
+  }
+  function runTrackers(now) {
+    if (video.readyState < 2) return;
+    const need = neededTrackers();
+    for (const key of ["seg", "face", "hand"]) {
+      const tr = T[key];
+      if (!need.has(key) || tr.state !== "ready" || tr.busy || now - tr.last < 33) continue;
+      tr.last = now;
+      if (FAKE[key]) { fakeData(key, now); continue; }
+      if (tr.via.startsWith("tasks")) {
+        try {
+          if (key === "seg") {
+            tr.inst.segmentForVideo(video, now, res => {
+              const masks = res.confidenceMasks; if (!masks || !masks.length) return;
+              const m = masks[masks.length - 1];
+              buildSegTexture(m.getAsFloat32Array(), m.width, m.height);
+            });
+          } else if (key === "face") {
+            const r = tr.inst.detectForVideo(video, now);
+            onFace(r.faceLandmarks && r.faceLandmarks[0], now);
+          } else {
+            const r = tr.inst.detectForVideo(video, now);
+            onHands(r.landmarks || [], now);
+          }
+        } catch (e) { runtimeFail(tr, e); }
+      } else if (tr.inst) {
+        tr.busy = true;
+        tr.inst.send({ image: video }).catch(e => runtimeFail(tr, e)).finally(() => { if (tr.state === "ready") tr.busy = false; });
+      }
+    }
+  }
+  const maskCanvas = document.createElement("canvas");
+  const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+  function onLegacyResult(tr, r) {
+    const now = performance.now();
+    if (tr.key === "seg") {
+      if (!r.segmentationMask) return;
+      const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+      const W = 160, H = Math.max(16, Math.round(160 * vh / vw));
+      if (maskCanvas.width !== W || maskCanvas.height !== H) { maskCanvas.width = W; maskCanvas.height = H; }
+      maskCtx.clearRect(0, 0, W, H);
+      maskCtx.drawImage(r.segmentationMask, 0, 0, W, H);
+      const d = maskCtx.getImageData(0, 0, W, H).data;
+      let alphaVaries = false;
+      for (let i = 3; i < d.length; i += 64) if (d[i] < 250) { alphaVaries = true; break; }
+      const c = new Float32Array(W * H);
+      for (let i = 0; i < W * H; i++) c[i] = (alphaVaries ? d[i * 4 + 3] : d[i * 4]) / 255;
+      buildSegTexture(c, W, H);
+    } else if (tr.key === "face") onFace(r.multiFaceLandmarks && r.multiFaceLandmarks[0], now);
+    else onHands(r.multiHandLandmarks || [], now);
+  }
+
+  // Status line for trackers the current effect needs
+  function updateStatus() {
+    const el = $("trackstat"); if (!el) return;
+    const msgs = []; const now = performance.now();
+    if (stream) for (const key of neededTrackers()) {
+      const tr = T[key]; if (!tr) continue;
+      if (tr.state === "loading") msgs.push(`${LABELS[key]}: loading (first time can take a few seconds)...`);
+      else if (tr.state === "failed") msgs.push(`${LABELS[key]} could not start. Tap here to retry. Details: ${tr.errors.slice(-3).join(" | ")}`);
+      else if (tr.state === "ready" && now - tr.seen > 2500 && now - (tr.readyAt || 0) > 1500) {
+        const what = key === "seg" ? "a person" : key === "face" ? "a face" : "a hand";
+        msgs.push(`${LABELS[key]} ready (${tr.via}${tr.delegate ? " " + tr.delegate : ""}). Looking for ${what}...`);
+      }
+    }
+    el.textContent = msgs.join("\n"); el.style.whiteSpace = "pre-line";
+    el.style.display = msgs.length ? "block" : "none";
+  }
+  $("trackstat").addEventListener("click", e => {
+    e.stopPropagation();
+    for (const key of neededTrackers()) {
+      const tr = T[key];
+      if (tr && tr.state === "failed") { tr.state = "idle"; if (tasksErr) tasksErr = null; loadTracker(tr); }
+    }
+  });
+
+  // ---------- Person mask -> distance field texture ----------
+  const DMAX = 0.6; // max encoded distance, in fractions of frame height
+  let segBuf = null, segDist = null, segHasPerson = false;
+  function buildSegTexture(conf, W, H) {
+    const n = W * H;
+    if (!segBuf || segBuf.length !== n * 2) { segBuf = new Uint8Array(n * 2); segDist = new Float32Array(n); }
+    // If the top corners (almost always background) read as "person", the mask is inverted: flip it.
+    let border = 0, bc = 0;
+    for (let y = 0; y < H * 0.15; y++) for (let x = 0; x < W * 0.15; x++) { border += conf[y * W + x] + conf[y * W + (W - 1 - x)]; bc += 2; }
+    const inv = border / bc > 0.7;
+    const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+    const ax = (vw / vh) / W, ay = 1 / H, ad = Math.hypot(ax, ay), k21 = Math.hypot(2 * ax, ay), k12 = Math.hypot(ax, 2 * ay), BIG = 1e3;
+    const D = segDist; let count = 0;
+    for (let i = 0; i < n; i++) {
+      const c = inv ? 1 - conf[i] : conf[i];
+      if (c > 0.5) { D[i] = 0; count++; } else D[i] = BIG;
+      segBuf[i * 2 + 1] = Math.max(0, Math.min(255, c * 255));
+    }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; let d = D[i]; if (d === 0) continue;
+      if (x > 0) d = Math.min(d, D[i - 1] + ax);
+      if (y > 0) { d = Math.min(d, D[i - W] + ay); if (x > 0) d = Math.min(d, D[i - W - 1] + ad); if (x < W - 1) d = Math.min(d, D[i - W + 1] + ad);
+        if (x > 1) d = Math.min(d, D[i - W - 2] + k21); if (x < W - 2) d = Math.min(d, D[i - W + 2] + k21); }
+      if (y > 1) { if (x > 0) d = Math.min(d, D[i - 2 * W - 1] + k12); if (x < W - 1) d = Math.min(d, D[i - 2 * W + 1] + k12); }
+      D[i] = d;
+    }
+    for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+      const i = y * W + x; let d = D[i]; if (d === 0) continue;
+      if (x < W - 1) d = Math.min(d, D[i + 1] + ax);
+      if (y < H - 1) { d = Math.min(d, D[i + W] + ay); if (x < W - 1) d = Math.min(d, D[i + W + 1] + ad); if (x > 0) d = Math.min(d, D[i + W - 1] + ad);
+        if (x < W - 2) d = Math.min(d, D[i + W + 2] + k21); if (x > 1) d = Math.min(d, D[i + W - 2] + k21); }
+      if (y < H - 2) { if (x < W - 1) d = Math.min(d, D[i + 2 * W + 1] + k12); if (x > 0) d = Math.min(d, D[i + 2 * W - 1] + k12); }
+      D[i] = d;
+    }
+    for (let i = 0; i < n; i++) segBuf[i * 2] = Math.min(255, D[i] / DMAX * 255);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, segTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, W, H, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, segBuf);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    segHasPerson = count > n * 0.01;
+    if (segHasPerson) T.seg.seen = performance.now();
+  }
+
+  // ---------- Face landmarks -> effect anchors ----------
+  // All positions are in camera texture space (x right, y up, 0..1). Sizes are in units of frame height.
+  const face = { on: 0, eyeA: [0.4, 0.5], eyeB: [0.6, 0.5], eyeRad: 0.02, third: [0.5, 0.6], c: [0.5, 0.5],
+    s: [0.1, 0.15], roll: 0, mouth: [0.5, 0.4], mouthW: 0.08, mouthO: 0, init: false };
+  function onFace(lm, now) {
+    if (!lm || lm.length < 468) return;
+    T.face.seen = now;
+    const ca = (video.videoWidth || 16) / (video.videoHeight || 9);
+    const P = i => [lm[i].x, 1 - lm[i].y];
+    const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const dist = (a, b) => Math.hypot((a[0] - b[0]) * ca, a[1] - b[1]);
+    let eA = lm.length >= 478 ? P(468) : mid(P(33), P(133));
+    let eB = lm.length >= 478 ? P(473) : mid(P(362), P(263));
+    if (eA[0] > eB[0]) [eA, eB] = [eB, eA];
+    const eyeDist = dist(eA, eB);
+    const mW = dist(P(61), P(291)), gap = dist(P(13), P(14));
+    const target = {
+      eyeA: eA, eyeB: eB, eyeRad: eyeDist * 0.2,
+      third: mid(P(9), P(151)),
+      c: mid(P(10), P(152)), s: [dist(P(234), P(454)) / 2, dist(P(10), P(152)) / 2],
+      roll: Math.atan2(eB[1] - eA[1], (eB[0] - eA[0]) * ca),
+      mouth: mid(P(13), P(14)), mouthW: mW,
+      mouthO: Math.max(0, Math.min(1, (gap / Math.max(mW, 1e-4) - 0.06) / 0.45)),
+    };
+    const a = face.init ? 0.55 : 1; face.init = true;
+    const L = (x, y) => x + (y - x) * a;
+    for (const k of ["eyeA", "eyeB", "third", "c", "s", "mouth"]) face[k] = [L(face[k][0], target[k][0]), L(face[k][1], target[k][1])];
+    for (const k of ["eyeRad", "roll", "mouthW", "mouthO"]) face[k] = L(face[k], target[k]);
+  }
+
+  // ---------- Hands -> particles ----------
+  const TIPS = [4, 8, 12, 16, 20];
+  const MAXP = 1400;
+  const P_ = { x: new Float32Array(MAXP), y: new Float32Array(MAXP), vx: new Float32Array(MAXP), vy: new Float32Array(MAXP),
+    life: new Float32Array(MAXP), max: new Float32Array(MAXP), size: new Float32Array(MAXP), hue: new Float32Array(MAXP), kind: new Uint8Array(MAXP) };
+  let pNext = 0, hands = [], prevTips = {};
+  const partData = new Float32Array(MAXP * 7);
+  function camToScreen(cx, cy) {
+    const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+    if (facing === "user") cx = 1 - cx;
+    const sa = canvas.width / canvas.height, ca = vw / vh;
+    let sx = cx, sy = cy;
+    if (sa > ca) sy = 0.5 + (cy - 0.5) / (ca / sa); else sx = 0.5 + (cx - 0.5) / (sa / ca);
+    return [sx, sy];
+  }
+  function onHands(list, now) {
+    hands = list.map(lm => TIPS.map(i => camToScreen(lm[i].x, 1 - lm[i].y)));
+    if (list.length) T.hand.seen = now;
+  }
+  function emit(x, y, vx, vy, kind, hue) {
+    const i = pNext; pNext = (pNext + 1) % MAXP;
+    P_.x[i] = x; P_.y[i] = y; P_.vx[i] = vx; P_.vy[i] = vy; P_.kind[i] = kind; P_.hue[i] = hue;
+    const life = kind === 0 ? 0.5 + Math.random() * 0.7 : 1.2 + Math.random() * 1.3;
+    P_.life[i] = life; P_.max[i] = life;
+    P_.size[i] = kind === 0 ? 4 + Math.random() * 8 : 18 + Math.random() * 26;
+  }
+  function burst() {
+    for (const tips of hands) for (const [x, y] of tips)
+      for (let j = 0; j < 12; j++) { const a = Math.random() * 6.283, s = 0.2 + Math.random() * 0.5; emit(x, y, Math.cos(a) * s, Math.sin(a) * s, EFFECTS[mode].id === 10 ? 0 : 1, Math.random()); }
+  }
+  function stepParticles(dt, now) {
+    const id = EFFECTS[mode].id;
+    if (id === 10 || id === 11) {
+      const kind = id === 10 ? 0 : 1, k = +$("k").value;
+      hands.forEach((tips, h) => tips.forEach(([x, y], f) => {
+        const key = h + "_" + f, p = prevTips[key];
+        const vx = p ? (x - p[0]) / Math.max(dt, 1e-3) : 0, vy = p ? (y - p[1]) / Math.max(dt, 1e-3) : 0;
+        prevTips[key] = [x, y];
+        const speed = Math.hypot(vx, vy);
+        const n = Math.round((kind === 0 ? 1.5 + Math.min(10, speed * 12) : 0.6 + Math.min(4, speed * 4)) * (0.4 + k * 1.6) * (1 + audioLevel));
+        for (let j = 0; j < n; j++) {
+          const a = Math.random() * 6.283, s = kind === 0 ? 0.05 + Math.random() * 0.3 : 0.01 + Math.random() * 0.05;
+          const t = Math.random();
+          emit(x - vx * dt * t, y - vy * dt * t, Math.cos(a) * s + vx * 0.25, Math.sin(a) * s + vy * 0.25, kind, (f / 5 + now / 4000) % 1);
+        }
+      }));
+      if (!hands.length) prevTips = {};
+    }
+    for (let i = 0; i < MAXP; i++) {
+      if (P_.life[i] <= 0) continue;
+      P_.life[i] -= dt;
+      if (P_.kind[i] === 0) { P_.vy[i] -= 0.9 * dt; P_.vx[i] *= 0.985; P_.vy[i] *= 0.985; }
+      else { P_.vy[i] += 0.12 * dt; P_.vx[i] = P_.vx[i] * 0.97 + (Math.sin(now / 700 + i) * 0.02) * dt * 10; P_.size[i] += 14 * dt; }
+      P_.x[i] += P_.vx[i] * dt; P_.y[i] += P_.vy[i] * dt;
+    }
+  }
+  function pal(t) { return [0, 0.33, 0.67].map(o => 0.5 + 0.5 * Math.cos(6.28318 * (t + o))); }
+  function drawParticles() {
+    let n = 0; const dpr = canvas.width / innerWidth;
+    for (let i = 0; i < MAXP; i++) {
+      if (P_.life[i] <= 0) continue;
+      const f = P_.life[i] / P_.max[i], c = pal(P_.hue[i] + (1 - f) * 0.3), o = n * 7;
+      partData[o] = P_.x[i]; partData[o + 1] = P_.y[i]; partData[o + 2] = P_.size[i] * dpr * (P_.kind[i] === 0 ? 0.6 + f * 0.6 : 1);
+      const bright = P_.kind[i] === 0 ? 1.3 : 0.55;
+      partData[o + 3] = Math.min(1, c[0] * bright + (P_.kind[i] === 0 ? f * 0.4 : 0.1));
+      partData[o + 4] = Math.min(1, c[1] * bright + (P_.kind[i] === 0 ? f * 0.4 : 0.1));
+      partData[o + 5] = Math.min(1, c[2] * bright + (P_.kind[i] === 0 ? f * 0.4 : 0.1));
+      partData[o + 6] = P_.kind[i] === 0 ? f : f * f * 0.35;
+      n++;
+    }
+    if (!n) return;
+    gl.useProgram(partProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, partBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, partData.subarray(0, n * 7), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(1); gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 28, 0);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 28, 8);
+    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 28, 12);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArrays(gl.POINTS, 0, n);
+    gl.disable(gl.BLEND);
+    gl.disableVertexAttribArray(1); gl.disableVertexAttribArray(2);
+    bindQuad();
+  }
+
+  // ---------- Test data (only when the page is opened with ?fakeseg / ?fakeface / ?fakehand) ----------
+  function fakeData(key, now) {
+    const s = now / 1000;
+    if (key === "seg") {
+      const W = 128, H = 128, c = new Float32Array(W * H), cx = 0.5 + 0.15 * Math.sin(s * 1.1);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const u = x / W - cx, v = y / H - 0.62, head = Math.hypot(u, (y / H - 0.3) * 1.2) < 0.09;
+        c[y * W + x] = (head || (Math.abs(u) < 0.16 && v > 0 && v < 0.45)) ? 1 : 0;
+      }
+      buildSegTexture(c, W, H);
+    } else if (key === "face") {
+      const lm = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5 }));
+      const cx = 0.5 + 0.06 * Math.sin(s * 0.8), cy = 0.42, open = 0.035 * (0.5 + 0.5 * Math.sin(s * 1.7));
+      const set = (i, x, y) => lm[i] = { x, y };
+      set(468, cx - 0.07, cy); set(473, cx + 0.07, cy); set(33, cx - 0.1, cy); set(133, cx - 0.04, cy); set(362, cx + 0.04, cy); set(263, cx + 0.1, cy);
+      set(9, cx, cy - 0.04); set(151, cx, cy - 0.1); set(10, cx, cy - 0.16); set(152, cx, cy + 0.24);
+      set(234, cx - 0.14, cy + 0.02); set(454, cx + 0.14, cy + 0.02);
+      set(13, cx, cy + 0.14 - open / 2); set(14, cx, cy + 0.14 + open / 2); set(61, cx - 0.055, cy + 0.14); set(291, cx + 0.055, cy + 0.14);
+      onFace(lm, now);
+    } else {
+      const lm = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.5 }));
+      TIPS.forEach((i, f) => lm[i] = { x: 0.5 + 0.2 * Math.cos(s * 2 + f * 0.4), y: 0.55 + 0.15 * Math.sin(s * 2.6 + f * 0.4) });
+      onHands([lm], now);
+    }
+  }
+
+  // ---------- Frame history (for Slit-Scan and Echo Clones) ----------
+  const hist = { tex: null, fbo: null, cols: 8, rows: 6, n: 48, tw: 0, th: 0, head: 0, count: 0, last: 0 };
+  function ensureHist() {
+    const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh) return false;
+    const land = vw >= vh, tw = land ? 320 : Math.round(320 * vw / vh), th = land ? Math.round(320 * vh / vw) : 320;
+    if (hist.tex && hist.tw === tw && hist.th === th) return true;
+    const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (tw * hist.cols > max || th * hist.rows > max) return false;
+    if (!hist.tex) { hist.tex = makeTex(); hist.fbo = gl.createFramebuffer(); }
+    hist.tw = tw; hist.th = th; hist.count = 0; hist.head = 0;
+    gl.bindTexture(gl.TEXTURE_2D, hist.tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw * hist.cols, th * hist.rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, hist.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, hist.tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return true;
+  }
+  function storeHist(now) {
+    if (now - hist.last < 33 || !ensureHist()) return;
+    hist.last = now;
+    hist.head = (hist.head + 1) % hist.n; hist.count = Math.min(hist.n, hist.count + 1);
+    const col = hist.head % hist.cols, row = Math.floor(hist.head / hist.cols);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, hist.fbo);
+    gl.viewport(col * hist.tw, row * hist.th, hist.tw, hist.th);
+    gl.useProgram(storeProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, camTex);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, segTex);
+    gl.uniform1i(storeProg.u.uCam, 0); gl.uniform1i(storeProg.u.uSeg, 2);
+    gl.uniform1f(storeProg.u.uSegOn, T.seg.state === "ready" && segHasPerson ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shaders
+  // ---------------------------------------------------------------------------
   const VS = `attribute vec2 p; varying vec2 v; void main(){ v = p*0.5+0.5; gl_Position = vec4(p,0.0,1.0); }`;
   const BLIT = `precision mediump float; varying vec2 v; uniform sampler2D t; void main(){ gl_FragColor = texture2D(t, v); }`;
+  const STORE = `precision mediump float; varying vec2 v; uniform sampler2D uCam, uSeg; uniform float uSegOn;
+    void main(){ gl_FragColor = vec4(texture2D(uCam, v).rgb, uSegOn > 0.5 ? texture2D(uSeg, v).a : 0.0); }`;
+  const PVS = `attribute vec2 p; attribute float aSize; attribute vec4 aCol; varying vec4 vCol;
+    void main(){ gl_Position = vec4(p*2.0-1.0, 0.0, 1.0); gl_PointSize = aSize; vCol = aCol; }`;
+  const PFS = `precision mediump float; varying vec4 vCol;
+    void main(){ float r = length(gl_PointCoord - 0.5)*2.0; float a = exp(-r*r*4.0)*(1.0 - smoothstep(0.8, 1.0, r));
+      gl_FragColor = vec4(vCol.rgb*vCol.a*a, 1.0); }`;
   const FX = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -366,9 +769,11 @@ precision highp float;
 precision mediump float;
 #endif
 varying vec2 v;
-uniform sampler2D uCam, uPrev, uSeg;
-uniform vec2 uRes, uCamRes;
-uniform float uTime, uMode, uK, uTrail, uAudio, uMirror, uSegOn, uProtect;
+uniform sampler2D uCam, uPrev, uSeg, uHist;
+uniform vec2 uRes, uCamRes, uHistGrid;
+uniform float uTime, uMode, uK, uTrail, uAudio, uMirror, uSegOn, uProtect, uFlash, uHead, uHistN, uHistCount;
+uniform vec2 uEyeA, uEyeB, uThird, uFaceC, uFaceS, uMouth;
+uniform float uEyeRad, uRoll, uMouthW, uMouthO, uFaceOn;
 #define PI 3.14159265
 #define TAU 6.2831853
 
@@ -381,7 +786,13 @@ vec2 camUV(vec2 uv){
   return uv;
 }
 vec3 cam(vec2 uv){ return texture2D(uCam, camUV(uv)).rgb; }
+vec3 camRaw(vec2 c){ return texture2D(uCam, clamp(c, 0.0, 1.0)).rgb; }
 vec2 seg(vec2 uv){ vec4 s = texture2D(uSeg, camUV(uv)); return vec2(s.r*0.6, s.a); } // (distance, mask)
+vec4 hist(float delay, vec2 c){
+  float idx = mod(floor(uHead - delay + uHistN*4.0 + 0.5), uHistN);
+  float col = mod(idx, uHistGrid.x), row = floor(idx/uHistGrid.x + 0.001);
+  return texture2D(uHist, (vec2(col, row) + clamp(c, 0.004, 0.996))/uHistGrid);
+}
 float lum(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
 vec3 hue(vec3 c, float h){
   const mat3 toYIQ = mat3(0.299,0.596,0.211, 0.587,-0.274,-0.523, 0.114,-0.322,0.312);
@@ -392,7 +803,43 @@ vec3 hue(vec3 c, float h){
 }
 vec3 pal(float t){ return 0.5 + 0.5*cos(TAU*(t + vec3(0.0, 0.33, 0.67))); }
 float hash(float n){ return fract(sin(n)*43758.5453); }
+float hash2(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)))*43758.5453); }
 mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(hash2(i), hash2(i + vec2(1.0, 0.0)), f.x), mix(hash2(i + vec2(0.0, 1.0)), hash2(i + vec2(1.0, 1.0)), f.x), f.y); }
+float fbm(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++){ s += a*vnoise(p); p = p*2.03 + vec2(1.7, 9.2); a *= 0.5; } return s; }
+float stars(vec2 p, float scale){
+  vec2 g = p*scale, id = floor(g), f = fract(g) - 0.5;
+  float h = hash2(id); vec2 o = vec2(hash2(id + 3.1), hash2(id + 7.7)) - 0.5;
+  float tw = 0.6 + 0.4*sin(uTime*(1.0 + h*3.0) + h*20.0);
+  return smoothstep(0.07, 0.0, length(f - o*0.7))*step(0.84, h)*tw;
+}
+vec3 cosmic(vec2 p){
+  float t = uTime; vec2 q = rot(t*0.02)*p;
+  float n = fbm(q*1.6 + vec2(t*0.03, -t*0.02) + fbm(q*3.0 - t*0.05));
+  vec3 c = mix(vec3(0.02, 0.0, 0.06), pal(n*0.8 + t*0.02 + 0.55)*0.9, smoothstep(0.35, 0.85, n));
+  float r = length(q), a = atan(q.y, q.x);
+  float arms = 0.5 + 0.5*sin(a*2.0 + log(r + 0.05)*5.0 - t*0.3);
+  c += pal(0.7 + r*0.3)*arms*exp(-r*2.2)*0.5*(0.6 + uK);
+  c += vec3(stars(q + t*0.01, 18.0) + 0.7*stars(q*1.7 - t*0.015, 34.0));
+  return c*(1.0 + uAudio*0.6);
+}
+vec3 spiralEye(vec3 c, vec2 cuv, vec2 E, vec2 ac){
+  vec2 d = (cuv - E)*ac; float r = length(d)/uEyeRad; float a = atan(d.y, d.x);
+  float sp = 0.5 + 0.5*sin(a*3.0 + log(r + 0.02)*(5.0 + 8.0*uK) - uTime*(5.0 + 6.0*uAudio));
+  float line = smoothstep(0.5, 0.95, sp);
+  float m = smoothstep(1.9, 1.1, r);
+  vec3 sc = pal(r*0.35 - uTime*0.4 + a/TAU);
+  vec3 e = mix(c*0.2, sc*1.7, line) + vec3(1.0)*exp(-r*6.0)*0.8;
+  return mix(c, e, m) + sc*exp(-r*0.9)*0.3*(1.0 - m)*(0.4 + uK);
+}
+vec3 glowEye(vec3 c, vec2 cuv, vec2 E, vec2 ac){
+  vec2 d = (cuv - E)*ac; float r = length(d)/uEyeRad; float a = atan(d.y, d.x);
+  float halo = exp(-r*mix(2.2, 0.9, uK));
+  float rays = pow(abs(cos(a*3.0 + uTime*0.8)), 30.0)*exp(-r*0.3)*uK;
+  vec3 col = pal(uTime*0.2 + E.x*2.0);
+  return c + col*(halo*1.3 + rays*1.5)*(1.0 + uAudio) + vec3(exp(-r*4.0));
+}
 
 void main(){
   vec2 uv = v; float t = uTime;
@@ -400,95 +847,164 @@ void main(){
   float asp = uRes.x/uRes.y;
   vec2 A = vec2(asp, 1.0);
   vec2 p = (uv - 0.5)*A;
-  vec3 col;
+  vec2 cuv = camUV(uv);
+  vec2 ac = vec2(uCamRes.x/max(uCamRes.y, 1.0), 1.0);
+  vec3 base = texture2D(uCam, cuv).rgb;
+  vec3 col = base;
 
-  if (uMode < 0.5) {                       // Kaleido
+  if (uMode < 1.5) {                                   // 0 Ripples, 1 Aura
+    vec2 s = seg(uv); float d = s.x; float m = s.y;
+    if (uSegOn < 0.5) { d = max(length(p) - 0.12, 0.0); m = 1.0 - smoothstep(0.1, 0.13, length(p)); }
+    if (uMode < 0.5) {
+      float ph = d*(14.0 + 30.0*uK) - t*(1.2 + 2.5*uAudio);
+      float f = fract(ph);
+      float line = smoothstep(0.10 + 0.12*uK + 0.1*uAudio, 0.0, min(f, 1.0 - f));
+      float fade = exp(-d*mix(4.5, 1.5, uK));
+      vec3 lc = pal(d*1.5 - t*0.15 + floor(ph)*0.07);
+      vec3 outside = base*(0.55 - 0.3*uK) + lc*line*fade*1.7 + lc*exp(-d*40.0)*0.8;
+      col = mix(outside, base, smoothstep(0.35, 0.65, m));
+    } else {
+      float g = exp(-d*mix(16.0, 4.0, uK)*(1.0 - 0.35*uAudio));
+      float wob = 0.5 + 0.5*sin(d*40.0 - t*3.0);
+      vec3 outside = base*0.45 + pal(t*0.25 + d*3.0)*g*(1.2 + 0.6*wob);
+      col = mix(outside, base, smoothstep(0.35, 0.65, m));
+    }
+  } else if (uMode < 2.5) {                            // 2 Echo Clones
+    float m = uSegOn > 0.5 ? seg(uv).y : 0.0;
+    col = base*0.5;
+    float D = floor(mix(3.0, 11.0, uK));
+    for (int j = 0; j < 4; j++) {
+      float i = 4.0 - float(j);
+      if (i*D < uHistCount) {
+        vec4 h = hist(i*D, cuv);
+        float hm = smoothstep(0.35, 0.65, h.a);
+        vec3 tint = pal(i*0.18 + t*0.1);
+        col = mix(col, tint*(0.3 + 1.3*lum(h.rgb)), hm*0.9);
+      }
+    }
+    col = mix(col, base, smoothstep(0.35, 0.65, m));
+  } else if (uMode < 3.5) {                            // 3 Cosmic BG
+    vec2 s = seg(uv);
+    float m = uSegOn > 0.5 ? smoothstep(0.35, 0.65, s.y) : 0.0;
+    col = mix(cosmic(p), base, m);
+    if (uSegOn > 0.5) col += pal(t*0.2)*exp(-s.x*60.0)*0.6*(1.0 - m);
+  } else if (uMode < 9.5) {                            // 4-9 face effects
+    vec3 fx = base;
+    if (uMode < 4.5) {                                 // Spiral Eyes
+      fx = spiralEye(spiralEye(base, cuv, uEyeA, ac), cuv, uEyeB, ac);
+    } else if (uMode < 5.5) {                          // Glow Eyes
+      fx = glowEye(glowEye(base, cuv, uEyeA, ac), cuv, uEyeB, ac);
+    } else if (uMode < 6.5) {                          // Third Eye
+      float S = uEyeRad*1.5*(1.0 + 0.08*sin(t*3.0) + 0.25*uAudio);
+      vec2 q = rot(uRoll)*((cuv - uThird)*ac)/S;
+      float r = length(q), a = atan(q.y, q.x);
+      float w = 0.5*(1.0 - q.y*q.y);
+      float inside = step(abs(q.y), 1.0)*smoothstep(w, w - 0.06, abs(q.x))*step(0.0, w);
+      float outline = smoothstep(0.08, 0.0, abs(abs(q.x) - max(w, 0.0)))*step(abs(q.y), 1.05);
+      vec3 iris = pal(r*1.5 - t*0.5 + 0.2*cos(a*8.0 + t*2.0))*(0.7 + 0.5*sin(r*50.0 - t*6.0));
+      float pupil = smoothstep(0.14 + 0.08*uAudio, 0.09, r);
+      vec3 eye = mix(vec3(0.95, 0.9, 1.0)*0.9, iris, smoothstep(0.44, 0.40, r))*(1.0 - pupil*0.95);
+      float mand = exp(-r*mix(1.6, 0.8, uK))*(0.5 + 0.5*cos(a*12.0 - t*1.5))*(0.5 + 0.5*cos(r*12.0 - t*2.0));
+      fx = base + pal(t*0.15)*mand*(0.4 + uK)*(1.0 - inside);
+      fx = mix(fx, eye, inside);
+      fx += pal(t*0.3 + 0.3)*outline*1.5;
+    } else if (uMode < 7.5) {                          // Face Melt
+      vec2 fp = rot(uRoll)*((cuv - uFaceC)*ac);
+      float nx = fp.x/uFaceS.x, ny = fp.y/uFaceS.y;
+      float reg = smoothstep(1.05, 0.75, length(vec2(nx, ny > 0.0 ? ny : ny*0.4)));
+      float depth = clamp(1.0 - ny, 0.0, 3.5);
+      float drip = 0.55 + 0.45*sin(nx*6.0 + t*0.6)*sin(nx*13.0 - t*0.35 + 1.3);
+      float dy = uK*uFaceS.y*0.35*drip*depth*reg*(1.0 + 0.5*sin(t*0.8)) + uAudio*0.02*reg;
+      float dx = uK*uFaceS.x*0.08*sin(ny*9.0 + t*2.0)*reg;
+      vec2 sp = cuv + (rot(-uRoll)*vec2(dx, dy))/ac;
+      fx = mix(base, hue(camRaw(sp), reg*uK*0.8*sin(t*0.5)), reg);
+    } else if (uMode < 8.5) {                          // Face Mirror
+      vec2 fp = rot(uRoll)*((cuv - uFaceC)*ac);
+      float nx = fp.x/uFaceS.x, ny = fp.y/uFaceS.y;
+      float reg = smoothstep(1.1, 0.85, length(vec2(nx, ny)));
+      vec2 q = fp; q.x = abs(q.x); q *= 1.0 - 0.15*uK*sin(t*2.0);
+      if (uK > 0.5) q.y = uFaceS.y*0.1 + abs(q.y - uFaceS.y*0.1);
+      vec2 sp = uFaceC + (rot(-uRoll)*q)/ac;
+      fx = mix(base, camRaw(sp), reg);
+      fx += pal(t*0.3 + ny*0.2)*smoothstep(0.08, 0.0, abs(length(vec2(nx, ny)) - 1.0))*0.7*uK;
+    } else {                                           // Mouth Portal
+      vec2 q = rot(uRoll)*((cuv - uMouth)*ac);
+      float rx = uMouthW*0.5, ry = max(rx*uMouthO*0.9, 1e-4);
+      float e = length(q/vec2(rx, ry));
+      float open = smoothstep(0.05, 0.2, uMouthO);
+      vec2 qn = q/rx; float rr = length(qn) + 1e-3; float aa = atan(qn.y, qn.x);
+      float z = 0.25/rr + t*(1.2 + 2.0*uAudio);
+      vec3 tun = pal(fract(z*0.5) + aa/TAU*2.0)*(0.6 + 0.4*sin(aa*6.0 + z*6.0))*smoothstep(0.0, 0.6, rr*1.5);
+      tun += vec3(stars(vec2(aa*2.0, z), 6.0));
+      fx = mix(base, tun*(1.2 + uK*0.5), smoothstep(1.0, 0.85, e)*open);
+      fx += pal(t*0.4)*exp(-abs(e - 1.0)*14.0)*open*0.8;
+      fx += pal(z)*exp(-e*1.2)*open*0.3*uK;
+    }
+    col = mix(base, fx, uFaceOn);
+  } else if (uMode < 11.5) {                           // 10-11 Hand Sparks / Smoke (particles drawn after)
+    col = base*0.75;
+  } else if (uMode < 12.5) {                           // 12 Slit-Scan
+    if (uHistCount > 2.0) {
+      float span = mix(10.0, uHistN - 1.0, uK)*min(1.0, uHistCount/uHistN);
+      float dl = (1.0 - uv.y)*span; float d0 = min(floor(dl), uHistCount - 2.0);
+      col = mix(hist(d0, cuv).rgb, hist(d0 + 1.0, cuv).rgb, clamp(dl - d0, 0.0, 1.0));
+    }
+  } else if (uMode < 13.5) {                           // 13 Kaleido
     float r = length(p)*(1.0 - 0.2*uAudio); float a = atan(p.y, p.x) + t*0.15;
     float s = TAU/(4.0 + floor(uK*8.0));
     a = mod(a, s); a = abs(a - s*0.5);
-    vec2 q = r*vec2(cos(a), sin(a))*(1.0 - 0.15*sin(t*0.5));
-    col = cam(q/A + 0.5);
-  } else if (uMode < 1.5) {                // RGB Split
+    col = cam(r*vec2(cos(a), sin(a))*(1.0 - 0.15*sin(t*0.5))/A + 0.5);
+  } else if (uMode < 14.5) {                           // 14 RGB Split
     vec2 o = (0.004 + 0.04*k)*vec2(cos(t*1.3), sin(t*0.9));
-    col = vec3(cam(uv + o).r, cam(uv).g, cam(uv - o).b);
+    col = vec3(cam(uv + o).r, base.g, cam(uv - o).b);
     col *= 0.92 + 0.08*sin(uv.y*uRes.y*1.2);
-  } else if (uMode < 2.5) {                // Liquid
+  } else if (uMode < 15.5) {                           // 15 Liquid
     vec2 w = uv + (0.008 + 0.05*k)*vec2(
       sin(uv.y*9.0 + t*2.0) + 0.4*sin(uv.y*23.0 - t*3.1),
       cos(uv.x*8.0 + t*1.7) + 0.4*cos(uv.x*19.0 + t*2.3));
     col = hue(cam(w), k*2.0*sin(t*0.3));
-  } else if (uMode < 3.5) {                // Acid
-    vec3 c = cam(uv);
-    col = hue(c, t*0.8 + lum(c)*k*6.0);
+  } else if (uMode < 16.5) {                           // 16 Acid
+    col = hue(base, t*0.8 + lum(base)*k*6.0);
     col = mix(vec3(lum(col)), col, 1.0 + k*1.5);
     float lv = mix(12.0, 3.0, uK); col = floor(col*lv + 0.5)/lv;
-  } else if (uMode < 4.5) {                // Vortex
+  } else if (uMode < 17.5) {                           // 17 Vortex
     float r = length(p); float a = atan(p.y, p.x);
     a += (0.5 + k*4.0)*sin(t*0.6)*exp(-r*2.5);
     col = cam(r*vec2(cos(a), sin(a))/A + 0.5);
-  } else if (uMode < 5.5) {                // Mirror
-    vec2 q = abs(p)*(1.0 + 0.3*k*sin(t*0.7));
-    q = rot(t*0.1*k)*q;
+  } else if (uMode < 18.5) {                           // 18 Mirror
+    vec2 q = rot(t*0.1*k)*(abs(p)*(1.0 + 0.3*k*sin(t*0.7)));
     col = cam(q/A + 0.5);
-  } else if (uMode < 6.5) {                // Thermal
-    float l = lum(cam(uv));
-    col = pal(l*(1.0 + k*2.0) - t*0.15);
-  } else if (uMode < 7.5) {                // Neon Edges
+  } else if (uMode < 19.5) {                           // 19 Thermal
+    col = pal(lum(base)*(1.0 + k*2.0) - t*0.15);
+  } else if (uMode < 20.5) {                           // 20 Neon Edges
     vec2 px = 1.5/uRes;
     float tl = lum(cam(uv + px*vec2(-1, 1))), tc = lum(cam(uv + px*vec2(0, 1))), tr = lum(cam(uv + px*vec2(1, 1)));
     float ml = lum(cam(uv + px*vec2(-1, 0))), mr = lum(cam(uv + px*vec2(1, 0)));
     float bl = lum(cam(uv + px*vec2(-1, -1))), bc = lum(cam(uv + px*vec2(0, -1))), br = lum(cam(uv + px*vec2(1, -1)));
-    float gx = tr + 2.0*mr + br - tl - 2.0*ml - bl;
-    float gy = tl + 2.0*tc + tr - bl - 2.0*bc - br;
-    float e = length(vec2(gx, gy));
-    col = pal(e*2.0 + t*0.2 + uv.y)*smoothstep(0.05, 0.4, e)*2.0 + cam(uv)*(1.0 - uK)*0.6;
-  } else if (uMode < 8.5) {                // Glitch
-    float bands = mix(8.0, 40.0, hash(floor(t*6.0)));
-    float row = floor(uv.y*bands);
-    float step10 = floor(t*10.0);
+    float e = length(vec2(tr + 2.0*mr + br - tl - 2.0*ml - bl, tl + 2.0*tc + tr - bl - 2.0*bc - br));
+    col = pal(e*2.0 + t*0.2 + uv.y)*smoothstep(0.05, 0.4, e)*2.0 + base*(1.0 - uK)*0.6;
+  } else if (uMode < 21.5) {                           // 21 Glitch
+    float row = floor(uv.y*mix(8.0, 40.0, hash(floor(t*6.0))));
+    float st = floor(t*10.0);
     vec2 w = uv;
-    if (hash(row + step10*13.0) > 1.0 - k*0.6) w.x += (hash(row*3.1 + step10) - 0.5)*0.25*k;
+    if (hash(row + st*13.0) > 1.0 - k*0.6) w.x += (hash(row*3.1 + st) - 0.5)*0.25*k;
     float o = 0.01*k + 0.02*uAudio;
     col = vec3(cam(w + vec2(o, 0.0)).r, cam(w).g, cam(w - vec2(o, 0.0)).b);
-    if (hash(row*7.7 + step10) > 0.97) col = 1.0 - col;
-  } else if (uMode < 9.5) {                // Tunnel
+    if (hash(row*7.7 + st) > 0.97) col = 1.0 - col;
+  } else {                                             // 22 Tunnel
     float r = max(length(p), 0.001); float a = atan(p.y, p.x);
-    vec2 q = vec2(a/PI + t*0.03, 0.25/r + t*(0.2 + 0.4*k));
-    vec3 tc = cam(q)*smoothstep(0.02, 0.3, r);
-    col = mix(cam(uv), tc, clamp(0.4 + uK, 0.0, 1.0));
-  } else {                                 // Ripples (10) and Aura (11): need the person mask
-    vec3 base = cam(uv);
-    vec2 s = seg(uv);
-    float d = s.x; float m = s.y;
-    if (uSegOn < 0.5) { d = max(length(p) - 0.12, 0.0); m = 1.0 - smoothstep(0.1, 0.13, length(p)); }
-    if (uMode < 10.5) {
-      // contour lines that follow the body outline and travel outward like ripples in a pond
-      float freq = 14.0 + 30.0*uK;
-      float ph = d*freq - t*(1.2 + 2.5*uAudio) ;
-      float f = fract(ph);
-      float w = 0.10 + 0.12*uK + 0.1*uAudio;
-      float line = smoothstep(w, 0.0, min(f, 1.0 - f));
-      float fade = exp(-d*mix(4.5, 1.5, uK));
-      vec3 lc = pal(d*1.5 - t*0.15 + floor(ph)*0.07);
-      vec3 outside = base*(0.55 - 0.3*uK) + lc*line*fade*1.7;
-      outside += lc*exp(-d*40.0)*0.8;                          // bright rim right at the edge
-      col = mix(outside, base, smoothstep(0.35, 0.65, m));
-    } else {
-      // pulsing colored halo around the body
-      float g = exp(-d*mix(16.0, 4.0, uK)*(1.0 - 0.35*uAudio));
-      float wob = 0.5 + 0.5*sin(d*40.0 - t*3.0);
-      vec3 hc = pal(t*0.25 + d*3.0);
-      vec3 outside = base*0.45 + hc*g*(1.2 + 0.6*wob);
-      col = mix(outside, base, smoothstep(0.35, 0.65, m));
-    }
+    vec3 tc = cam(vec2(a/PI + t*0.03, 0.25/r + t*(0.2 + 0.4*k)))*smoothstep(0.02, 0.3, r);
+    col = mix(base, tc, clamp(0.4 + uK, 0.0, 1.0));
   }
 
   // Feedback trails (melting echo with slow zoom, twist and hue drift)
   vec2 pu = rot(0.003*uTrail)*((uv - 0.5)*(1.0 - 0.006*uTrail)) + 0.5;
   vec3 pc = hue(texture2D(uPrev, pu).rgb, 0.06*uTrail);
   col = mix(clamp(col, 0.0, 1.0), pc, uTrail*0.92);
-  // Keep me clear: show the person untouched, effects only on the background
-  if (uProtect > 0.5 && uSegOn > 0.5) col = mix(col, cam(uv), smoothstep(0.35, 0.65, seg(uv).y));
+  // Keep me clear: the person stays untouched, effects only on the background
+  if (uProtect > 0.5 && uSegOn > 0.5) col = mix(col, base, smoothstep(0.35, 0.65, seg(uv).y));
+  // Beat flash
+  col = mix(col, hue(vec3(1.0) - col, t*3.0), uFlash*0.55) + pal(t*0.7)*uFlash*0.25;
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }`;
 
@@ -497,10 +1013,10 @@ void main(){
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
     return s;
   }
-  function program(fs) {
+  function program(vs, fs, attribs = ["p"]) {
     const p = gl.createProgram();
-    gl.attachShader(p, compile(gl.VERTEX_SHADER, VS)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
-    gl.bindAttribLocation(p, 0, "p"); gl.linkProgram(p);
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    attribs.forEach((a, i) => gl.bindAttribLocation(p, i, a)); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     p.u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
     for (let i = 0; i < n; i++) { const info = gl.getActiveUniform(p, i); p.u[info.name] = gl.getUniformLocation(p, info.name); }
@@ -514,12 +1030,15 @@ void main(){
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return t;
   }
+  function bindQuad() {
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  }
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
     if (canvas.width === w && canvas.height === h && fbos.length) return;
     canvas.width = w; canvas.height = h;
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     for (let i = 0; i < 2; i++) {
       if (!fboTex[i]) { fboTex[i] = makeTex(); fbos[i] = gl.createFramebuffer(); }
       gl.bindTexture(gl.TEXTURE_2D, fboTex[i]);
@@ -534,20 +1053,30 @@ void main(){
     if (gl) return;
     gl = canvas.getContext("webgl", { antialias: false, alpha: false, preserveDrawingBuffer: false });
     if (!gl) throw new Error("WebGL is not available");
-    fxProg = program(FX); blitProg = program(BLIT);
-    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    fxProg = program(VS, FX); blitProg = program(VS, BLIT); storeProg = program(VS, STORE);
+    partProg = program(PVS, PFS, ["p", "aSize", "aCol"]);
+    quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    partBuf = gl.createBuffer();
+    bindQuad();
     camTex = makeTex();
     segTex = makeTex();
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, 1, 1, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, new Uint8Array([255, 0]));
+    const dummy = makeTex();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+    hist.dummy = dummy;
     resize(); addEventListener("resize", resize);
   }
 
   function frame(now) {
     requestAnimationFrame(frame);
-    resize(); readAudio();
-    if (auto && now - lastAuto > 6000) { lastAuto = now; setMode((mode + 1) % EFFECTS.length); }
+    const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+    resize(); readAudio(now, dt);
+    if (auto && now - lastAuto > 6000) {
+      lastAuto = now;
+      let n = mode; for (let j = 0; j < EFFECTS.length; j++) { n = (n + 1) % EFFECTS.length; if (usable(n)) break; }
+      setMode(n);
+    }
 
     if (video.readyState >= 2) {
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, camTex);
@@ -555,7 +1084,14 @@ void main(){
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     }
-    runSeg(now);
+    runTrackers(now);
+    const fx = EFFECTS[mode];
+    if (fx.needs.includes("hist") && video.readyState >= 2) storeHist(now);
+    stepParticles(dt, now);
+
+    const faceTarget = now - T.face.seen < 500 ? 1 : 0;
+    face.on += (faceTarget - face.on) * Math.min(1, dt * 8);
+
     const prev = cur ^ 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbos[cur]);
     gl.viewport(0, 0, canvas.width, canvas.height);
@@ -563,21 +1099,30 @@ void main(){
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, camTex);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, fboTex[prev]);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, segTex);
-    const u = fxProg.u;
-    gl.uniform1i(u.uCam, 0); gl.uniform1i(u.uPrev, 1); gl.uniform1i(u.uSeg, 2);
-    gl.uniform1f(u.uSegOn, segReady && segHasPerson ? 1 : 0);
-    gl.uniform1f(u.uProtect, protect ? 1 : 0);
-    gl.uniform2f(u.uRes, canvas.width, canvas.height);
-    gl.uniform2f(u.uCamRes, video.videoWidth || 1, video.videoHeight || 1);
-    gl.uniform1f(u.uTime, (now - t0) / 1000);
-    gl.uniform1f(u.uMode, mode < 2 ? 10 + mode : mode - 2);
-    gl.uniform1f(u.uK, +$("k").value);
-    gl.uniform1f(u.uTrail, +$("tr").value);
-    gl.uniform1f(u.uAudio, audioLevel);
-    gl.uniform1f(u.uMirror, facing === "user" ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, hist.tex || hist.dummy);
+    const u = fxProg.u, f1 = (n, x) => gl.uniform1f(u[n], x), f2 = (n, a) => gl.uniform2f(u[n], a[0], a[1]);
+    gl.uniform1i(u.uCam, 0); gl.uniform1i(u.uPrev, 1); gl.uniform1i(u.uSeg, 2); gl.uniform1i(u.uHist, 3);
+    f1("uSegOn", T.seg.state === "ready" && segHasPerson ? 1 : 0);
+    f1("uProtect", protect ? 1 : 0);
+    f2("uRes", [canvas.width, canvas.height]);
+    f2("uCamRes", [video.videoWidth || 1, video.videoHeight || 1]);
+    f1("uTime", (now - t0) / 1000);
+    f1("uMode", fx.id);
+    f1("uK", +$("k").value);
+    f1("uTrail", +$("tr").value);
+    f1("uAudio", audioLevel);
+    f1("uFlash", flash);
+    f1("uMirror", facing === "user" ? 1 : 0);
+    f2("uHistGrid", [hist.cols, hist.rows]); f1("uHead", hist.head); f1("uHistN", hist.n); f1("uHistCount", hist.tex ? hist.count : 0);
+    f2("uEyeA", face.eyeA); f2("uEyeB", face.eyeB); f1("uEyeRad", Math.max(face.eyeRad, 1e-3));
+    f2("uThird", face.third); f2("uFaceC", face.c); f2("uFaceS", [Math.max(face.s[0], 1e-3), Math.max(face.s[1], 1e-3)]);
+    f1("uRoll", face.roll); f2("uMouth", face.mouth); f1("uMouthW", Math.max(face.mouthW, 1e-3)); f1("uMouthO", face.mouthO);
+    f1("uFaceOn", face.on);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    drawParticles();
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
     gl.useProgram(blitProg);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fboTex[cur]);
     gl.uniform1i(blitProg.u.t, 0);
@@ -585,9 +1130,14 @@ void main(){
     cur = prev;
   }
 
-  // Test hook: ?fx=3 preselects an effect
-  const q = new URLSearchParams(location.search).get("fx");
-  if (q !== null && EFFECTS[+q]) setMode(+q);
+  // Startup: ?fx=<name or number> preselects an effect
+  const q = Q.get("fx");
+  if (q !== null) {
+    const i = isNaN(+q) ? EFFECTS.findIndex(e => e.name.toLowerCase().replace(/\s+/g, "") === q.toLowerCase()) : +q;
+    if (EFFECTS[i]) mode = i;
+  }
+  renderGroups(); renderChips();
+  window.__dbg = () => ({ mode: EFFECTS[mode].name, trackers: Object.fromEntries(Object.entries(T).map(([k, t]) => [k, { state: t.state, via: t.via, delegate: t.delegate, errors: t.errors }])), segHasPerson, face: face.on, hands: hands.length, hist: hist.count });
 })();
 </script>
 </body>
