@@ -80,7 +80,11 @@
   </div>
   <div class="row">
     <button class="btn" id="flip">Flip</button>
+    <button class="btn" id="reset">Reset cam</button>
     <button class="btn" id="mic">Mic react</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="btn" id="protect">Keep me clear</button>
     <button class="btn" id="auto">Auto</button>
     <button class="btn" id="rec">Rec</button>
   </div>
@@ -88,7 +92,8 @@
 
 <script>
 (() => {
-  const EFFECTS = ["Kaleido", "RGB Split", "Liquid", "Acid", "Vortex", "Mirror", "Thermal", "Neon Edges", "Glitch", "Tunnel"];
+  const EFFECTS = ["Ripples", "Aura", "Kaleido", "RGB Split", "Liquid", "Acid", "Vortex", "Mirror", "Thermal", "Neon Edges", "Glitch", "Tunnel"];
+  const PERSON_FX = [0, 1]; // effects that need person detection
   const $ = id => document.getElementById(id);
   const canvas = $("c");
   const video = document.createElement("video");
@@ -114,6 +119,7 @@
   });
   function setMode(i) {
     mode = i;
+    if (PERSON_FX.includes(i)) loadSeg();
     [...$("chips").children].forEach((c, j) => c.classList.toggle("active", j === i));
     $("chips").children[i].scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
   }
@@ -126,13 +132,54 @@
   });
 
   // ---------- Camera ----------
+  let camBusy = false, lastVT = -1, stallSince = 0;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
   async function startCam() {
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
-    });
-    video.srcObject = stream; await video.play();
+    if (camBusy) return;               // ignore overlapping taps (a common cause of frozen feeds)
+    camBusy = true;
+    try {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      stream = null; video.pause(); video.srcObject = null;
+      await sleep(250);                // give Android time to release the camera
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      } catch (e) {
+        if (e.name === "NotAllowedError") throw e;
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); // plain fallback
+      }
+      stream.getVideoTracks().forEach(t => t.onended = () => resetCam("Camera stopped, restarting"));
+      video.srcObject = stream; await video.play();
+      lastVT = -1; stallSince = 0;
+    } finally { camBusy = false; }
   }
+  function clearTrails() {
+    if (!gl) return;
+    fbos.forEach(f => { gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  async function resetCam(msg) {
+    if (camBusy) return;
+    if (msg) toast(msg);
+    try { await startCam(); clearTrails(); }
+    catch (e) { toast("Camera restart failed: " + (e.message || e.name)); }
+  }
+  $("reset").onclick = e => { e.stopPropagation(); resetCam("Restarting camera"); };
+  // Watchdog: restart if the feed stops advancing for 2s or the track ends
+  setInterval(() => {
+    if (!stream || camBusy || document.hidden) return;
+    const tr = stream.getVideoTracks()[0];
+    if (!tr || tr.readyState === "ended") { resetCam("Camera stopped, restarting"); return; }
+    if (video.currentTime !== lastVT) { lastVT = video.currentTime; stallSince = 0; return; }
+    if (!stallSince) stallSince = performance.now();
+    else if (performance.now() - stallSince > 2000) resetCam("Camera froze, restarting");
+  }, 500);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && stream) setTimeout(() => {
+      const tr = stream && stream.getVideoTracks()[0];
+      if (!tr || tr.readyState === "ended" || video.paused) resetCam("Restarting camera");
+    }, 400);
+  });
   $("go").onclick = async () => {
     $("err").textContent = "";
     if (!window.isSecureContext || !navigator.mediaDevices) {
@@ -144,14 +191,111 @@
       $("start").style.display = "none"; $("ui").classList.remove("hidden");
       setTimeout(() => $("hint").style.opacity = 0, 4000);
       requestAnimationFrame(frame);
+      if (PERSON_FX.includes(mode)) loadSeg();
     } catch (e) {
       $("err").textContent = "Could not open the camera: " + (e.message || e.name) + ". Check that camera permission is allowed for this site.";
     }
   };
   $("flip").onclick = async e => {
-    e.stopPropagation(); facing = facing === "user" ? "environment" : "user";
-    try { await startCam(); } catch (err) { toast("Could not switch camera"); }
+    e.stopPropagation(); if (camBusy) return;
+    facing = facing === "user" ? "environment" : "user";
+    try { await startCam(); clearTrails(); } catch (err) { toast("Could not switch camera"); }
   };
+
+  // ---------- Person detection (MediaPipe Selfie Segmenter) ----------
+  // Produces a small texture: luminance = distance outside the person, alpha = person mask.
+  const MP_VER = "1.0.1";
+  const MP_BUNDLE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}/vision_bundle.mjs`;
+  const MP_WASM = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}/wasm`;
+  const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+  const DMAX = 0.6; // max encoded distance, in fractions of frame height
+  let segmenter = null, segLoading = false, segReady = false, segTex = null, segBuf = null, segDist = null, lastSeg = 0;
+  const fakeSeg = new URLSearchParams(location.search).has("fakeseg");
+  let protect = false;
+
+  async function loadSeg() {
+    if (segReady || segLoading) return;
+    if (fakeSeg) { segReady = true; return; }
+    segLoading = true; toast("Loading person detection...", 4000);
+    try {
+      const { FilesetResolver, ImageSegmenter } = await import(MP_BUNDLE);
+      const fileset = await FilesetResolver.forVisionTasks(MP_WASM);
+      const opts = d => ({ baseOptions: { modelAssetPath: MP_MODEL, delegate: d },
+        runningMode: "VIDEO", outputConfidenceMasks: true, outputCategoryMask: false });
+      try { segmenter = await ImageSegmenter.createFromOptions(fileset, opts("GPU")); }
+      catch (e) { segmenter = await ImageSegmenter.createFromOptions(fileset, opts("CPU")); }
+      segReady = true; toast("Person detection ready");
+    } catch (e) {
+      toast("Person detection failed to load. Ripples will use the center of the frame.", 5000);
+      console.error(e);
+    } finally { segLoading = false; }
+  }
+  $("protect").onclick = e => {
+    e.stopPropagation(); protect = !protect; $("protect").classList.toggle("on", protect);
+    if (protect) loadSeg();
+  };
+
+  // Two-pass chamfer distance transform: distance from each pixel to the nearest person pixel
+  function buildSegTexture(conf, W, H) {
+    const n = W * H;
+    if (!segBuf || segBuf.length !== n * 2) { segBuf = new Uint8Array(n * 2); segDist = new Float32Array(n); }
+    // Some model builds report background instead of person; if the frame border is mostly "on", invert.
+    let border = 0, bc = 0;
+    for (let x = 0; x < W; x += 4) { border += conf[x] + conf[(H - 1) * W + x]; bc += 2; }
+    for (let y = 0; y < H; y += 4) { border += conf[y * W] + conf[y * W + W - 1]; bc += 2; }
+    const inv = border / bc > 0.6;
+    const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+    const ax = (vw / vh) / W, ay = 1 / H, ad = Math.hypot(ax, ay), k21 = Math.hypot(2 * ax, ay), k12 = Math.hypot(ax, 2 * ay), BIG = 1e3;
+    const D = segDist;
+    for (let i = 0; i < n; i++) { const c = inv ? 1 - conf[i] : conf[i]; D[i] = c > 0.5 ? 0 : BIG; segBuf[i * 2 + 1] = Math.max(0, Math.min(255, c * 255)); }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; let d = D[i]; if (d === 0) continue;
+      if (x > 0) d = Math.min(d, D[i - 1] + ax);
+      if (y > 0) { d = Math.min(d, D[i - W] + ay); if (x > 0) d = Math.min(d, D[i - W - 1] + ad); if (x < W - 1) d = Math.min(d, D[i - W + 1] + ad);
+        if (x > 1) d = Math.min(d, D[i - W - 2] + k21); if (x < W - 2) d = Math.min(d, D[i - W + 2] + k21); }
+      if (y > 1) { if (x > 0) d = Math.min(d, D[i - 2 * W - 1] + k12); if (x < W - 1) d = Math.min(d, D[i - 2 * W + 1] + k12); }
+      D[i] = d;
+    }
+    for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+      const i = y * W + x; let d = D[i]; if (d === 0) continue;
+      if (x < W - 1) d = Math.min(d, D[i + 1] + ax);
+      if (y < H - 1) { d = Math.min(d, D[i + W] + ay); if (x < W - 1) d = Math.min(d, D[i + W + 1] + ad); if (x > 0) d = Math.min(d, D[i + W - 1] + ad);
+        if (x < W - 2) d = Math.min(d, D[i + W + 2] + k21); if (x > 1) d = Math.min(d, D[i + W - 2] + k21); }
+      if (y < H - 2) { if (x < W - 1) d = Math.min(d, D[i + 2 * W + 1] + k12); if (x > 0) d = Math.min(d, D[i + 2 * W - 1] + k12); }
+      D[i] = d;
+    }
+    let any = false;
+    for (let i = 0; i < n; i++) { if (D[i] < BIG) any = true; segBuf[i * 2] = Math.min(255, D[i] / DMAX * 255); }
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, segTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, W, H, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, segBuf);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    segHasPerson = any;
+  }
+  let segHasPerson = false;
+  function runSeg(now) {
+    if (!segReady || video.readyState < 2 || now - lastSeg < 33) return;
+    const needed = PERSON_FX.includes(mode) || protect;
+    if (!needed) return;
+    lastSeg = now;
+    if (fakeSeg) { // synthetic moving figure for testing without a real person
+      const W = 128, H = 128, c = new Float32Array(W * H), cx = 0.5 + 0.15 * Math.sin(now / 900);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const u = x / W - cx, v = y / H - 0.62, head = Math.hypot(u, (y / H - 0.3) * 1.2) < 0.09;
+        c[y * W + x] = (head || (Math.abs(u) < 0.16 && v > 0 && v < 0.45)) ? 1 : 0;
+      }
+      buildSegTexture(c, W, H); return;
+    }
+    if (!segmenter) return;
+    try {
+      segmenter.segmentForVideo(video, now, res => {
+        const masks = res.confidenceMasks; if (!masks || !masks.length) return;
+        const m = masks[masks.length - 1];
+        buildSegTexture(m.getAsFloat32Array(), m.width, m.height);
+      });
+    } catch (e) { console.error(e); }
+  }
 
   // ---------- Mic (audio reactive) ----------
   $("mic").onclick = async e => {
@@ -222,9 +366,9 @@ precision highp float;
 precision mediump float;
 #endif
 varying vec2 v;
-uniform sampler2D uCam, uPrev;
+uniform sampler2D uCam, uPrev, uSeg;
 uniform vec2 uRes, uCamRes;
-uniform float uTime, uMode, uK, uTrail, uAudio, uMirror;
+uniform float uTime, uMode, uK, uTrail, uAudio, uMirror, uSegOn, uProtect;
 #define PI 3.14159265
 #define TAU 6.2831853
 
@@ -237,6 +381,7 @@ vec2 camUV(vec2 uv){
   return uv;
 }
 vec3 cam(vec2 uv){ return texture2D(uCam, camUV(uv)).rgb; }
+vec2 seg(vec2 uv){ vec4 s = texture2D(uSeg, camUV(uv)); return vec2(s.r*0.6, s.a); } // (distance, mask)
 float lum(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
 vec3 hue(vec3 c, float h){
   const mat3 toYIQ = mat3(0.299,0.596,0.211, 0.587,-0.274,-0.523, 0.114,-0.322,0.312);
@@ -306,17 +451,44 @@ void main(){
     float o = 0.01*k + 0.02*uAudio;
     col = vec3(cam(w + vec2(o, 0.0)).r, cam(w).g, cam(w - vec2(o, 0.0)).b);
     if (hash(row*7.7 + step10) > 0.97) col = 1.0 - col;
-  } else {                                 // Tunnel
+  } else if (uMode < 9.5) {                // Tunnel
     float r = max(length(p), 0.001); float a = atan(p.y, p.x);
     vec2 q = vec2(a/PI + t*0.03, 0.25/r + t*(0.2 + 0.4*k));
     vec3 tc = cam(q)*smoothstep(0.02, 0.3, r);
     col = mix(cam(uv), tc, clamp(0.4 + uK, 0.0, 1.0));
+  } else {                                 // Ripples (10) and Aura (11): need the person mask
+    vec3 base = cam(uv);
+    vec2 s = seg(uv);
+    float d = s.x; float m = s.y;
+    if (uSegOn < 0.5) { d = max(length(p) - 0.12, 0.0); m = 1.0 - smoothstep(0.1, 0.13, length(p)); }
+    if (uMode < 10.5) {
+      // contour lines that follow the body outline and travel outward like ripples in a pond
+      float freq = 14.0 + 30.0*uK;
+      float ph = d*freq - t*(1.2 + 2.5*uAudio) ;
+      float f = fract(ph);
+      float w = 0.10 + 0.12*uK + 0.1*uAudio;
+      float line = smoothstep(w, 0.0, min(f, 1.0 - f));
+      float fade = exp(-d*mix(4.5, 1.5, uK));
+      vec3 lc = pal(d*1.5 - t*0.15 + floor(ph)*0.07);
+      vec3 outside = base*(0.55 - 0.3*uK) + lc*line*fade*1.7;
+      outside += lc*exp(-d*40.0)*0.8;                          // bright rim right at the edge
+      col = mix(outside, base, smoothstep(0.35, 0.65, m));
+    } else {
+      // pulsing colored halo around the body
+      float g = exp(-d*mix(16.0, 4.0, uK)*(1.0 - 0.35*uAudio));
+      float wob = 0.5 + 0.5*sin(d*40.0 - t*3.0);
+      vec3 hc = pal(t*0.25 + d*3.0);
+      vec3 outside = base*0.45 + hc*g*(1.2 + 0.6*wob);
+      col = mix(outside, base, smoothstep(0.35, 0.65, m));
+    }
   }
 
   // Feedback trails (melting echo with slow zoom, twist and hue drift)
   vec2 pu = rot(0.003*uTrail)*((uv - 0.5)*(1.0 - 0.006*uTrail)) + 0.5;
   vec3 pc = hue(texture2D(uPrev, pu).rgb, 0.06*uTrail);
   col = mix(clamp(col, 0.0, 1.0), pc, uTrail*0.92);
+  // Keep me clear: show the person untouched, effects only on the background
+  if (uProtect > 0.5 && uSegOn > 0.5) col = mix(col, cam(uv), smoothstep(0.35, 0.65, seg(uv).y));
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }`;
 
@@ -367,6 +539,8 @@ void main(){
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     camTex = makeTex();
+    segTex = makeTex();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, 1, 1, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, new Uint8Array([255, 0]));
     resize(); addEventListener("resize", resize);
   }
 
@@ -381,18 +555,22 @@ void main(){
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     }
+    runSeg(now);
     const prev = cur ^ 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbos[cur]);
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.useProgram(fxProg);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, camTex);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, fboTex[prev]);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, segTex);
     const u = fxProg.u;
-    gl.uniform1i(u.uCam, 0); gl.uniform1i(u.uPrev, 1);
+    gl.uniform1i(u.uCam, 0); gl.uniform1i(u.uPrev, 1); gl.uniform1i(u.uSeg, 2);
+    gl.uniform1f(u.uSegOn, segReady && segHasPerson ? 1 : 0);
+    gl.uniform1f(u.uProtect, protect ? 1 : 0);
     gl.uniform2f(u.uRes, canvas.width, canvas.height);
     gl.uniform2f(u.uCamRes, video.videoWidth || 1, video.videoHeight || 1);
     gl.uniform1f(u.uTime, (now - t0) / 1000);
-    gl.uniform1f(u.uMode, mode);
+    gl.uniform1f(u.uMode, mode < 2 ? 10 + mode : mode - 2);
     gl.uniform1f(u.uK, +$("k").value);
     gl.uniform1f(u.uTrail, +$("tr").value);
     gl.uniform1f(u.uAudio, audioLevel);
